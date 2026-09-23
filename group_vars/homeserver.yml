@@ -1,0 +1,8 @@
+cloudflare_api_token: "YOUR_API_TOKEN"
+cloudflare_zone_id: "YOUR_ZONE_ID"
+cloudflare_record_id: "YOUR_RECORD_ID"
+cloudflare_dns_name: "home.example.com"
+ 
+compose_dir: "/opt/docker"
+ 
+state_file: "/tmp/network_state"
