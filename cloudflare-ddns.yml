@@ -10,46 +10,95 @@
 
   tasks:
 
-    - name: Test connectivity to Cloudflare DNS
+    - name: Check connectivity to Cloudflare DNS 1
       shell: ping -c1 -W2 1.1.1.1 >/dev/null 2>&1
-      register: netcheck
+      register: ping_cf
       failed_when: false
       changed_when: false
+
+    - name: Check connectivity to Google DNS
+      shell: ping -c1 -W2 8.8.8.8 >/dev/null 2>&1
+      register: ping_google
+      failed_when: false
+      changed_when: false
+
+    - name: Determine network state
+      set_fact:
+        network_ok: >-
+          {{ ping_cf.rc == 0 or ping_google.rc == 0 }}
+
+    - name: Read current failure count
+      slurp:
+        src: "{{ failure_file }}"
+      register: failure_data
+      failed_when: false
+
+    - name: Set failure count
+      set_fact:
+        failure_count: >-
+          {{
+            (failure_data.content | b64decode | trim | int)
+            if failure_data.content is defined
+            else 0
+          }}
+
+    - name: Increase failure count
+      copy:
+        dest: "{{ failure_file }}"
+        content: "{{ failure_count | int + 1 }}"
+      when: not network_ok
+
+    - name: Reset failure count
+      copy:
+        dest: "{{ failure_file }}"
+        content: "0"
+      when: network_ok
+
+    - name: Calculate new failure count
+      set_fact:
+        current_failures: >-
+          {{
+            (failure_count | int + 1)
+            if not network_ok
+            else 0
+          }}
 
     - name: Read previous state
       slurp:
         src: "{{ state_file }}"
-      register: state
+      register: state_data
       failed_when: false
 
     - name: Set previous state
       set_fact:
         previous_state: >-
           {{
-            (state.content | default('') | b64decode | trim)
-            if state.content is defined
-            else 'UNKNOWN'
+            (state_data.content | b64decode | trim)
+            if state_data.content is defined
+            else 'UP'
           }}
 
-    - name: Network lost - shutdown compose stack
+    - name: Bring compose down after threshold reached
       command: docker compose down
       args:
         chdir: "{{ compose_dir }}"
       when:
-        - netcheck.rc != 0
+        - current_failures >= failure_threshold
         - previous_state != "DOWN"
 
     - name: Record DOWN state
       copy:
         dest: "{{ state_file }}"
         content: "DOWN"
-      when: netcheck.rc != 0
+      when:
+        - current_failures >= failure_threshold
+        - previous_state != "DOWN"
 
-    - name: Stop execution when network unavailable
+    - name: Stop execution while internet unavailable
       meta: end_play
-      when: netcheck.rc != 0
+      when: not network_ok
 
-    - name: Network restored - start compose stack
+    - name: Bring compose up when network restored
       command: docker compose up -d
       args:
         chdir: "{{ compose_dir }}"
@@ -66,7 +115,7 @@
         return_content: true
       register: public_ip
 
-    - name: Get Cloudflare DNS record
+    - name: Get Cloudflare record
       uri:
         url: "{{ api_url }}"
         method: GET
@@ -75,7 +124,7 @@
           Content-Type: application/json
       register: cf_record
 
-    - name: Update DNS if IP changed
+    - name: Update Cloudflare record when IP changes
       uri:
         url: "{{ api_url }}"
         method: PUT
