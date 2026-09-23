@@ -1,0 +1,92 @@
+---
+- name: Cloudflare DDNS and Docker Compose Management
+  hosts: homeserver
+  gather_facts: false
+
+  vars:
+    api_url: >-
+      https://api.cloudflare.com/client/v4/zones/
+      {{ cloudflare_zone_id }}/dns_records/{{ cloudflare_record_id }}
+
+  tasks:
+
+    - name: Test connectivity to Cloudflare DNS
+      shell: ping -c1 -W2 1.1.1.1 >/dev/null 2>&1
+      register: netcheck
+      failed_when: false
+      changed_when: false
+
+    - name: Read previous state
+      slurp:
+        src: "{{ state_file }}"
+      register: state
+      failed_when: false
+
+    - name: Set previous state
+      set_fact:
+        previous_state: >-
+          {{
+            (state.content | default('') | b64decode | trim)
+            if state.content is defined
+            else 'UNKNOWN'
+          }}
+
+    - name: Network lost - shutdown compose stack
+      command: docker compose down
+      args:
+        chdir: "{{ compose_dir }}"
+      when:
+        - netcheck.rc != 0
+        - previous_state != "DOWN"
+
+    - name: Record DOWN state
+      copy:
+        dest: "{{ state_file }}"
+        content: "DOWN"
+      when: netcheck.rc != 0
+
+    - name: Stop execution when network unavailable
+      meta: end_play
+      when: netcheck.rc != 0
+
+    - name: Network restored - start compose stack
+      command: docker compose up -d
+      args:
+        chdir: "{{ compose_dir }}"
+      when: previous_state == "DOWN"
+
+    - name: Record UP state
+      copy:
+        dest: "{{ state_file }}"
+        content: "UP"
+
+    - name: Get public IP
+      uri:
+        url: https://api.ipify.org
+        return_content: true
+      register: public_ip
+
+    - name: Get Cloudflare DNS record
+      uri:
+        url: "{{ api_url }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ cloudflare_api_token }}"
+          Content-Type: application/json
+      register: cf_record
+
+    - name: Update DNS if IP changed
+      uri:
+        url: "{{ api_url }}"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ cloudflare_api_token }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          type: A
+          name: "{{ cloudflare_dns_name }}"
+          content: "{{ public_ip.content }}"
+          ttl: 1
+          proxied: false
+      when: public_ip.content != cf_record.json.result.content
